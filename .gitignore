@@ -1,0 +1,33 @@
+# 機器本地 CMake 設定（不進版本控制）
+CMakeUserPresets.json
+
+# CMake 產生的建置目錄
+build/
+out/
+cmake-build-*/
+
+#vcpkg
+vcpkg_installed/
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# 編譯產物
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.ime
+
+# 其他
+*.user
+*.suo
+.cache/
+
+
