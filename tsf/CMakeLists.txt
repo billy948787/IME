@@ -1,8 +1,8 @@
-file(GLOB_RECURSE HEADERS "include/*.h" "include/*.hpp")
+file(GLOB_RECURSE HEADERS "src/*.h" "src/*.hpp")
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 set(DEF_FILE "${CMAKE_CURRENT_SOURCE_DIR}/ime.def")
 
-include_directories(include)
+include_directories(src)
 
 add_library(IME SHARED ${SOURCES} ${HEADERS} ${DEF_FILE})
 
@@ -21,15 +21,10 @@ target_compile_options(IME PRIVATE
     /utf-8      # 原始碼 UTF-8 編碼
 )
 
-target_include_directories(IME PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/compat
-)
-
-find_package(wil CONFIG REQUIRED)
+find_package(cppwinrt CONFIG REQUIRED)
 
 target_link_libraries(IME PRIVATE
-    WIL::WIL
+    Microsoft::CppWinRT
     advapi32    # Registry API
     ole32       # COM
     oleaut32    # COM Automation
