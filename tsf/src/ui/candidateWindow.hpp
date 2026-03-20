@@ -1,9 +1,19 @@
 #pragma once
 
+#include <windows.ui.xaml.hosting.desktopwindowxamlsource.h>
 #include <windows.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.UI.Text.h>
+#include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Xaml.Hosting.h>
+#include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Xaml.h>
+#include <winrt/Windows.UI.h>
+#include <winrt/base.h>
 
 #include <algorithm>
-#include <gdiplus.h>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,14 +29,21 @@ public:
         if (number_column_ >= layout_columns_) {
             number_column_ = 0;
         }
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::set_layout_columns " + std::to_wstring(layout_columns_));
+        DebugSink::instance().send(L"UI", L"CandidateWindow::set_layout_columns " + std::to_wstring(layout_columns_));
     }
 
     void set_number_column(std::size_t column) {
         number_column_ = std::min(column, layout_columns_ - 1);
+        DebugSink::instance().send(L"UI", L"CandidateWindow::set_number_column " + std::to_wstring(number_column_));
+    }
+
+    void set_page_navigation(bool can_prev_page, bool can_next_page) {
+        can_prev_page_ = can_prev_page;
+        can_next_page_ = can_next_page;
         DebugSink::instance().send(
-            L"UI", L"CandidateWindow::set_number_column " + std::to_wstring(number_column_));
+            L"UI", L"CandidateWindow::set_page_navigation prev=" + std::wstring(can_prev_page_ ? L"TRUE" : L"FALSE") +
+                       L", next=" + std::wstring(can_next_page_ ? L"TRUE" : L"FALSE"));
+        render_surface();
     }
 
     void update_candidates(const std::vector<std::wstring>& values) {
@@ -45,6 +62,7 @@ public:
 
         if (candidates_.empty()) {
             selection_index_ = 0;
+            clear_surface();
             DebugSink::instance().send(L"UI", L"CandidateWindow::update_candidates empty -> hide");
             hide();
             return;
@@ -60,7 +78,9 @@ public:
             DebugSink::instance().send(L"UI", L"CandidateWindow::update_candidates ensure_window failed");
             return;
         }
+
         resize_to_layout();
+        render_surface();
         invalidate(FALSE);
     }
 
@@ -71,9 +91,9 @@ public:
             return;
         }
         selection_index_ = std::min(index, candidates_.size() - 1);
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::set_selection index=" + std::to_wstring(index) +
-                      L", effective=" + std::to_wstring(selection_index_));
+        DebugSink::instance().send(L"UI", L"CandidateWindow::set_selection index=" + std::to_wstring(index) +
+                                              L", effective=" + std::to_wstring(selection_index_));
+        render_surface();
         invalidate(FALSE);
     }
 
@@ -98,8 +118,8 @@ public:
         const auto [width, height] = client_size();
         DebugSink::instance().send(
             L"UI", L"CandidateWindow::show_near_cursor cursor=(" + std::to_wstring(cursor.x) + L"," +
-                      std::to_wstring(cursor.y) + L"), size=(" + std::to_wstring(width) + L"," +
-                      std::to_wstring(height) + L")");
+                       std::to_wstring(cursor.y) + L"), size=(" + std::to_wstring(width) + L"," +
+                       std::to_wstring(height) + L")");
         show_at(cursor.x, cursor.y);
     }
 
@@ -137,23 +157,24 @@ public:
             }
         }
         DebugSink::instance().send(
-            L"UI", L"CandidateWindow::show_at anchor=(" + std::to_wstring(anchorX) + L"," +
-                      std::to_wstring(anchorY) + L"), final=(" + std::to_wstring(x) + L"," +
-                      std::to_wstring(y) + L"), size=(" + std::to_wstring(width) + L"," + std::to_wstring(height) +
-                      L")");
+            L"UI", L"CandidateWindow::show_at anchor=(" + std::to_wstring(anchorX) + L"," + std::to_wstring(anchorY) +
+                       L"), final=(" + std::to_wstring(x) + L"," + std::to_wstring(y) + L"), size=(" +
+                       std::to_wstring(width) + L"," + std::to_wstring(height) + L")");
         set_window_pos(HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         show(SW_SHOWNOACTIVATE);
     }
 
 private:
-    static constexpr int popup_width = 128;
-    static constexpr int expanded_popup_width = 410;
+    static constexpr int popup_width = 114;
+    static constexpr int expanded_column_width = 84;
+    static constexpr int column_gap = 12;
     static constexpr int popup_offset_x = 0;
     static constexpr int popup_offset_y = 4;
-    static constexpr int top_padding = 4;
-    static constexpr int row_height = 26;
-    static constexpr int bottom_bar_height = 20;
-    static constexpr int corner_radius = 10;
+    static constexpr int content_padding_x = 6;
+    static constexpr int content_padding_y = 6;
+    static constexpr int row_height = 29;
+    static constexpr int bottom_bar_height = 24;
+    static constexpr int corner_radius = 9;
     static constexpr std::size_t max_visible_candidates = 36;
     static constexpr std::size_t max_layout_columns = 4;
     static constexpr int page_size = 9;
@@ -172,6 +193,7 @@ protected:
             case WM_SIZE:
                 DebugSink::instance().send(L"UI", L"CandidateWindow::handle_message WM_SIZE");
                 apply_round_region();
+                resize_xaml_island();
                 return 0;
             case WM_ERASEBKGND:
                 DebugSink::instance().send(L"UI", L"CandidateWindow::handle_message WM_ERASEBKGND");
@@ -186,78 +208,43 @@ protected:
         return Window::handle_message(message, wParam, lParam);
     }
 
-private:
-    class GdiplusSession {
-    public:
-        static bool ensure() {
-            static GdiplusSession session;
-            return session.ok_;
-        }
-
-    private:
-        GdiplusSession() {
-            Gdiplus::GdiplusStartupInput input;
-            ok_ = (Gdiplus::GdiplusStartup(&token_, &input, nullptr) == Gdiplus::Ok);
-            DebugSink::instance().send(
-                L"UI", L"CandidateWindow::GdiplusSession startup ok=" + std::wstring(ok_ ? L"TRUE" : L"FALSE") +
-                          L", token=" + std::to_wstring(token_));
-        }
-
-        ~GdiplusSession() {
-            if (token_ != 0) {
-                Gdiplus::GdiplusShutdown(token_);
-            }
-            DebugSink::instance().send(
-                L"UI", L"CandidateWindow::GdiplusSession shutdown token=" + std::to_wstring(token_));
-        }
-
-    private:
-        ULONG_PTR token_ = 0;
-        bool ok_ = false;
-    };
-
-    static void build_rounded_path(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, Gdiplus::REAL radius) {
-        const Gdiplus::REAL diameter = radius * 2.0f;
-        path.AddArc(rect.X, rect.Y, diameter, diameter, 180.0f, 90.0f);
-        path.AddArc(rect.GetRight() - diameter, rect.Y, diameter, diameter, 270.0f, 90.0f);
-        path.AddArc(
-            rect.GetRight() - diameter, rect.GetBottom() - diameter, diameter, diameter, 0.0f, 90.0f);
-        path.AddArc(rect.X, rect.GetBottom() - diameter, diameter, diameter, 90.0f, 90.0f);
-        path.CloseFigure();
+    void on_final_destroy() noexcept override {
+        xaml_island_.close();
     }
 
+private:
     bool ensure_window() {
         if (created()) {
             DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_window already created");
             return true;
         }
-        if (!GdiplusSession::ensure()) {
-            DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_window GDI+ not available");
-            return false;
-        }
 
         const auto [width, height] = client_size();
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::ensure_window creating size=(" + std::to_wstring(width) + L"," +
-                      std::to_wstring(height) + L")");
-        if (!create(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_POPUP, L"IME Candidate List", CW_USEDEFAULT,
-                CW_USEDEFAULT, width, height)) {
+        DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_window creating size=(" + std::to_wstring(width) +
+                                              L"," + std::to_wstring(height) + L")");
+        if (!create(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_POPUP, L"IME Candidate List", CW_USEDEFAULT,
+                    CW_USEDEFAULT, width, height)) {
             DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_window create failed");
             return false;
         }
+
         apply_round_region();
+        ensure_xaml_island();
+        render_surface();
         DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_window created");
         return true;
     }
 
     std::pair<int, int> client_size() const {
         const int rows = std::max(1, std::min(page_size, static_cast<int>(candidates_.size())));
-        const int height = top_padding + rows * row_height + bottom_bar_height;
-        const int width = (layout_columns_ <= 1) ? popup_width : expanded_popup_width;
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::client_size rows=" + std::to_wstring(rows) +
-                      L", width=" + std::to_wstring(width) + L", height=" + std::to_wstring(height));
+        const std::size_t columns = std::max<std::size_t>(1, std::min(layout_columns_, max_layout_columns));
+        const int width = (columns == 1)
+                              ? popup_width
+                              : content_padding_x * 2 + static_cast<int>(columns) * expanded_column_width +
+                                    static_cast<int>(columns - 1) * column_gap;
+        const int height = content_padding_y * 2 + rows * row_height + bottom_bar_height;
+        DebugSink::instance().send(L"UI", L"CandidateWindow::client_size rows=" + std::to_wstring(rows) + L", width=" +
+                                              std::to_wstring(width) + L", height=" + std::to_wstring(height));
         return {width, height};
     }
 
@@ -274,38 +261,402 @@ private:
             DebugSink::instance().send(L"UI", L"CandidateWindow::apply_round_region ignored: not created");
             return;
         }
+
         RECT rc = {};
         GetClientRect(hwnd(), &rc);
-        const int width = rc.right - rc.left;
-        const int height = rc.bottom - rc.top;
+        const int width = static_cast<int>(rc.right - rc.left);
+        const int height = static_cast<int>(rc.bottom - rc.top);
         if (width <= 0 || height <= 0) {
-            DebugSink::instance().send(
-                L"UI", L"CandidateWindow::apply_round_region invalid size width=" + std::to_wstring(width) +
-                          L", height=" + std::to_wstring(height));
+            DebugSink::instance().send(L"UI", L"CandidateWindow::apply_round_region invalid size width=" +
+                                                  std::to_wstring(width) + L", height=" + std::to_wstring(height));
             return;
         }
 
         const int ellipse = corner_radius * 2;
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, ellipse, ellipse);
         if (!region) {
-            DebugSink::instance().send(
-                L"UI", L"CandidateWindow::apply_round_region CreateRoundRectRgn failed err=" +
-                          std::to_wstring(GetLastError()));
+            DebugSink::instance().send(L"UI", L"CandidateWindow::apply_round_region CreateRoundRectRgn failed err=" +
+                                                  std::to_wstring(GetLastError()));
             return;
         }
         if (SetWindowRgn(hwnd(), region, TRUE) == 0) {
             DeleteObject(region);
             DebugSink::instance().send(
-                L"UI", L"CandidateWindow::apply_round_region SetWindowRgn failed err=" + std::to_wstring(GetLastError()));
+                L"UI",
+                L"CandidateWindow::apply_round_region SetWindowRgn failed err=" + std::to_wstring(GetLastError()));
             return;
         }
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::apply_round_region success width=" + std::to_wstring(width) +
-                      L", height=" + std::to_wstring(height));
+        DebugSink::instance().send(L"UI", L"CandidateWindow::apply_round_region success width=" +
+                                              std::to_wstring(width) + L", height=" + std::to_wstring(height));
+    }
+
+    class XamlIslandHost {
+    public:
+        bool ensure(HWND parent) {
+            if (island_hwnd_ != nullptr) {
+                return true;
+            }
+
+            const HRESULT apartment_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            if (FAILED(apartment_hr) && apartment_hr != RPC_E_CHANGED_MODE) {
+                DebugSink::instance().send(
+                    L"UI", L"CandidateWindow::XamlIslandHost CoInitializeEx failed hr=" + std::to_wstring(apartment_hr));
+                return false;
+            }
+            if (apartment_hr == RPC_E_CHANGED_MODE) {
+                DebugSink::instance().send(
+                    L"UI", L"CandidateWindow::XamlIslandHost CoInitializeEx changed mode; skip XAML island");
+                return false;
+            }
+
+            apartment_initialized_ = SUCCEEDED(apartment_hr);
+
+            try {
+                if (!xaml_manager_) {
+                    xaml_manager_ = winrt::Windows::UI::Xaml::Hosting::WindowsXamlManager::InitializeForCurrentThread();
+                }
+                if (!xaml_source_) {
+                    xaml_source_ = winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSource();
+                }
+
+                const auto interop = xaml_source_.as<::IDesktopWindowXamlSourceNative>();
+                winrt::check_hresult(interop->AttachToWindow(parent));
+
+                HWND island_hwnd = nullptr;
+                winrt::check_hresult(interop->get_WindowHandle(&island_hwnd));
+                island_hwnd_ = island_hwnd;
+
+                DebugSink::instance().send(
+                    L"UI", L"CandidateWindow::XamlIslandHost attached hwnd=" +
+                               std::to_wstring(reinterpret_cast<ULONG_PTR>(island_hwnd_)));
+                return true;
+            } catch (const winrt::hresult_error& e) {
+                DebugSink::instance().send(
+                    L"UI", L"CandidateWindow::XamlIslandHost ensure failed hr=" +
+                               std::to_wstring(e.code().value) + L", message=" + std::wstring(e.message().c_str()));
+            } catch (...) {
+                DebugSink::instance().send(L"UI", L"CandidateWindow::XamlIslandHost ensure failed with unknown error");
+            }
+
+            close();
+            return false;
+        }
+
+        bool ready() const noexcept {
+            return island_hwnd_ != nullptr && xaml_source_ != nullptr;
+        }
+
+        void resize(int width, int height) const noexcept {
+            if (island_hwnd_ == nullptr) {
+                return;
+            }
+            const BOOL ok =
+                SetWindowPos(island_hwnd_, nullptr, 0, 0, width, height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+            DebugSink::instance().send(
+                L"UI", L"CandidateWindow::XamlIslandHost resize width=" + std::to_wstring(width) +
+                           L", height=" + std::to_wstring(height) + L", ok=" + std::wstring(ok ? L"TRUE" : L"FALSE"));
+        }
+
+        void clear() {
+            if (!ready()) {
+                return;
+            }
+
+            try {
+                xaml_source_.Content(winrt::Windows::UI::Xaml::UIElement{nullptr});
+            } catch (...) {
+                DebugSink::instance().send(L"UI", L"CandidateWindow::XamlIslandHost clear ignored exception");
+            }
+        }
+
+        void render(const std::vector<std::wstring>& candidates, std::size_t selection_index, std::size_t layout_columns,
+                    std::size_t number_column, bool can_prev_page, bool can_next_page) {
+            if (!ready()) {
+                return;
+            }
+
+            try {
+                xaml_source_.Content(build_root(candidates, selection_index, layout_columns, number_column, can_prev_page,
+                                                can_next_page));
+            } catch (const winrt::hresult_error& e) {
+                DebugSink::instance().send(
+                    L"UI", L"CandidateWindow::XamlIslandHost render failed hr=" +
+                               std::to_wstring(e.code().value) + L", message=" + std::wstring(e.message().c_str()));
+            } catch (...) {
+                DebugSink::instance().send(L"UI", L"CandidateWindow::XamlIslandHost render failed with unknown error");
+            }
+        }
+
+        void close() noexcept {
+            island_hwnd_ = nullptr;
+            try {
+                if (xaml_source_) {
+                    xaml_source_.Close();
+                    xaml_source_ = nullptr;
+                }
+                if (xaml_manager_) {
+                    xaml_manager_.Close();
+                    xaml_manager_ = nullptr;
+                }
+            } catch (...) {
+                DebugSink::instance().send(L"UI", L"CandidateWindow::XamlIslandHost close ignored exception");
+            }
+
+            if (apartment_initialized_) {
+                CoUninitialize();
+                apartment_initialized_ = false;
+            }
+        }
+
+    private:
+        static winrt::Windows::UI::Color color(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            return winrt::Windows::UI::Color{255, r, g, b};
+        }
+
+        static winrt::Windows::UI::Xaml::Media::SolidColorBrush brush(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            return winrt::Windows::UI::Xaml::Media::SolidColorBrush(color(r, g, b));
+        }
+
+        static double column_width(std::size_t layout_columns) {
+            return (layout_columns <= 1) ? static_cast<double>(CandidateWindow::popup_width - CandidateWindow::content_padding_x * 2)
+                                         : static_cast<double>(CandidateWindow::expanded_column_width);
+        }
+
+        static double candidate_text_width(std::size_t layout_columns, bool show_number) {
+            (void)show_number;
+            if (layout_columns <= 1) {
+                return 56.0;
+            }
+            return 42.0;
+        }
+
+        static winrt::Windows::UI::Xaml::Controls::TextBlock build_text(const std::wstring& text, double font_size,
+                                                                         std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            using namespace winrt::Windows::UI::Text;
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+            using namespace winrt::Windows::UI::Xaml::Media;
+
+            TextBlock block;
+            block.Text(text);
+            block.FontFamily(FontFamily(L"Microsoft JhengHei UI"));
+            block.FontSize(font_size);
+            block.FontWeight(FontWeights::Normal());
+            block.Foreground(brush(r, g, b));
+            block.TextTrimming(TextTrimming::CharacterEllipsis);
+            block.TextWrapping(TextWrapping::NoWrap);
+            block.VerticalAlignment(VerticalAlignment::Center);
+            return block;
+        }
+
+        static winrt::Windows::UI::Xaml::UIElement build_candidate_item(std::size_t layout_columns, bool show_number,
+                                                                         bool selected, int row_number,
+                                                                         const std::wstring& value) {
+            using namespace winrt::Windows::UI::Text;
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+
+            Border host;
+            host.Width(column_width(layout_columns));
+            host.Height(static_cast<double>(CandidateWindow::row_height - 1));
+            host.Margin(Thickness{0.0, 0.0, 0.0, 1.0});
+            host.CornerRadius(CornerRadius{5.0, 5.0, 5.0, 5.0});
+            host.Background(selected ? brush(237, 237, 237) : brush(0, 0, 0, 0));
+
+            StackPanel row;
+            row.Orientation(Orientation::Horizontal);
+            row.VerticalAlignment(VerticalAlignment::Center);
+
+            Border accent;
+            accent.Width(2.0);
+            accent.Height(15.0);
+            accent.Margin(Thickness{6.0, 6.0, 6.0, 6.0});
+            accent.CornerRadius(CornerRadius{2.0, 2.0, 2.0, 2.0});
+            accent.Background((show_number && selected) ? brush(0, 102, 214) : brush(0, 0, 0, 0));
+            row.Children().Append(accent);
+
+            auto number_text = build_text(show_number ? std::to_wstring(row_number) : L"", 14.0, 96, 96, 96);
+            number_text.Width(14.0);
+            number_text.Margin(Thickness{0.0, 0.0, 6.0, 0.0});
+            row.Children().Append(number_text);
+
+            auto value_text = build_text(value, (layout_columns <= 1) ? 17.0 : 16.0, 33, 33, 33);
+            value_text.Width(candidate_text_width(layout_columns, show_number));
+            value_text.FontWeight(selected ? FontWeights::SemiBold() : FontWeights::Normal());
+            value_text.Margin(Thickness{0.0, 0.0, 6.0, 0.0});
+            row.Children().Append(value_text);
+
+            host.Child(row);
+            return host;
+        }
+
+        static winrt::Windows::UI::Xaml::UIElement build_column(const std::vector<std::wstring>& candidates,
+                                                                std::size_t layout_columns, std::size_t number_column,
+                                                                std::size_t selection_index, std::size_t column_index) {
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+
+            StackPanel column;
+            column.Width(column_width(layout_columns));
+            if (column_index + 1 < layout_columns) {
+                column.Margin(Thickness{0.0, 0.0, static_cast<double>(CandidateWindow::column_gap), 0.0});
+            }
+
+            const std::size_t begin = column_index * CandidateWindow::page_size;
+            const std::size_t end = std::min(begin + CandidateWindow::page_size, candidates.size());
+            const bool show_number = (column_index == number_column);
+            for (std::size_t i = begin; i < end; ++i) {
+                const int row_number = static_cast<int>(i - begin) + 1;
+                column.Children().Append(
+                    build_candidate_item(layout_columns, show_number, i == selection_index, row_number, candidates[i]));
+            }
+
+            return column;
+        }
+
+        static winrt::Windows::UI::Xaml::UIElement build_footer_icon(const wchar_t* glyph, bool enabled, bool outlined) {
+            using namespace winrt::Windows::UI::Text;
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+
+            auto icon_text = build_text(glyph, 9.5, enabled ? 37 : 170, enabled ? 37 : 170, enabled ? 37 : 170);
+            icon_text.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily(L"Segoe UI Symbol"));
+            icon_text.HorizontalAlignment(HorizontalAlignment::Center);
+            icon_text.VerticalAlignment(VerticalAlignment::Center);
+
+            Border host;
+            host.Width(outlined ? 16.0 : 11.0);
+            host.Height(16.0);
+            host.Margin(Thickness{0.0, 0.0, 6.0, 0.0});
+            host.CornerRadius(CornerRadius{3.0, 3.0, 3.0, 3.0});
+            host.BorderThickness(outlined ? Thickness{1.0, 1.0, 1.0, 1.0} : Thickness{0.0, 0.0, 0.0, 0.0});
+            host.BorderBrush(brush(enabled ? 55 : 180, enabled ? 55 : 180, enabled ? 55 : 180));
+            host.Child(icon_text);
+            return host;
+        }
+
+        static winrt::Windows::UI::Xaml::UIElement build_footer(std::size_t layout_columns, bool can_prev_page,
+                                                                bool can_next_page) {
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+
+            Border footer;
+            footer.BorderThickness(Thickness{0.0, 1.0, 0.0, 0.0});
+            footer.BorderBrush(brush(225, 225, 225));
+            footer.Margin(Thickness{0.0, 3.0, 0.0, 0.0});
+            footer.Padding(Thickness{6.0, 4.0, 6.0, 4.0});
+
+            Grid footer_grid;
+
+            StackPanel left_group;
+            left_group.Orientation(Orientation::Horizontal);
+            left_group.HorizontalAlignment(HorizontalAlignment::Left);
+            left_group.Children().Append(build_footer_icon(layout_columns <= 1 ? L"\u25B2" : L"\u25C0", can_prev_page, false));
+            left_group.Children().Append(build_footer_icon(layout_columns <= 1 ? L"\u25BC" : L"\u25B6", can_next_page, false));
+
+            StackPanel right_group;
+            right_group.Orientation(Orientation::Horizontal);
+            right_group.HorizontalAlignment(HorizontalAlignment::Right);
+            right_group.Children().Append(build_footer_icon(L"\u21B5", true, true));
+            right_group.Children().Append(build_footer_icon(L"\u2665", true, true));
+
+            footer_grid.Children().Append(left_group);
+            footer_grid.Children().Append(right_group);
+            footer.Child(footer_grid);
+            return footer;
+        }
+
+        static winrt::Windows::UI::Xaml::UIElement build_root(const std::vector<std::wstring>& candidates,
+                                                              std::size_t selection_index, std::size_t layout_columns,
+                                                              std::size_t number_column, bool can_prev_page,
+                                                              bool can_next_page) {
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+
+            Border root;
+            root.Background(brush(248, 248, 248));
+            root.BorderBrush(brush(221, 221, 221));
+            root.BorderThickness(Thickness{1.0, 1.0, 1.0, 1.0});
+            root.CornerRadius(CornerRadius{10.0, 10.0, 10.0, 10.0});
+
+            StackPanel surface;
+            surface.Orientation(Orientation::Vertical);
+
+            StackPanel columns;
+            columns.Orientation(Orientation::Horizontal);
+            columns.Margin(
+                Thickness{static_cast<double>(CandidateWindow::content_padding_x),
+                          static_cast<double>(CandidateWindow::content_padding_y),
+                          static_cast<double>(CandidateWindow::content_padding_x), 0.0});
+
+            const std::size_t visible_columns = std::max<std::size_t>(1, std::min(layout_columns, CandidateWindow::max_layout_columns));
+            for (std::size_t column_index = 0; column_index < visible_columns; ++column_index) {
+                columns.Children().Append(
+                    build_column(candidates, visible_columns, number_column, selection_index, column_index));
+            }
+
+            surface.Children().Append(columns);
+            surface.Children().Append(build_footer(visible_columns, can_prev_page, can_next_page));
+            root.Child(surface);
+            return root;
+        }
+
+    private:
+        static winrt::Windows::UI::Xaml::Media::SolidColorBrush brush(std::uint8_t r, std::uint8_t g, std::uint8_t b,
+                                                                      std::uint8_t a) {
+            return winrt::Windows::UI::Xaml::Media::SolidColorBrush(
+                winrt::Windows::UI::Color{a, r, g, b});
+        }
+
+    private:
+        winrt::Windows::UI::Xaml::Hosting::WindowsXamlManager xaml_manager_{nullptr};
+        winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSource xaml_source_{nullptr};
+        HWND island_hwnd_ = nullptr;
+        bool apartment_initialized_ = false;
+    };
+
+    void ensure_xaml_island() {
+        if (!created()) {
+            return;
+        }
+        if (!xaml_island_.ensure(hwnd())) {
+            DebugSink::instance().send(L"UI", L"CandidateWindow::ensure_xaml_island skipped");
+            return;
+        }
+        resize_xaml_island();
+    }
+
+    void resize_xaml_island() {
+        if (!created()) {
+            return;
+        }
+
+        RECT rc = {};
+        GetClientRect(hwnd(), &rc);
+        const LONG raw_width = rc.right - rc.left;
+        const LONG raw_height = rc.bottom - rc.top;
+        const int width = (raw_width > 0) ? static_cast<int>(raw_width) : 0;
+        const int height = (raw_height > 0) ? static_cast<int>(raw_height) : 0;
+        if (width == 0 || height == 0) {
+            return;
+        }
+
+        xaml_island_.resize(width, height);
+    }
+
+    void render_surface() {
+        if (candidates_.empty() || !xaml_island_.ready()) {
+            return;
+        }
+
+        xaml_island_.render(candidates_, selection_index_, layout_columns_, number_column_, can_prev_page_, can_next_page_);
+    }
+
+    void clear_surface() {
+        xaml_island_.clear();
     }
 
     void paint() {
-        DebugSink::instance().send(L"UI", L"CandidateWindow::paint begin");
         PAINTSTRUCT ps = {};
         HDC hdc = BeginPaint(hwnd(), &ps);
         if (!hdc) {
@@ -313,137 +664,8 @@ private:
                 L"UI", L"CandidateWindow::paint BeginPaint failed err=" + std::to_wstring(GetLastError()));
             return;
         }
-
-        RECT client = {};
-        GetClientRect(hwnd(), &client);
-        const int width = client.right - client.left;
-        const int height = client.bottom - client.top;
-
-        HDC memDc = CreateCompatibleDC(hdc);
-        HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
-        const HGDIOBJ oldBitmap = SelectObject(memDc, bitmap);
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::paint target size=(" + std::to_wstring(width) + L"," + std::to_wstring(height) +
-                      L"), memDc=" + std::to_wstring(reinterpret_cast<ULONG_PTR>(memDc)) +
-                      L", bitmap=" + std::to_wstring(reinterpret_cast<ULONG_PTR>(bitmap)));
-
-        {
-            Gdiplus::Graphics g(memDc);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
-            draw_background(g, width, height);
-            draw_candidates(g, width);
-            draw_bottom_bar(g, width, height);
-        }
-
-        BitBlt(hdc, 0, 0, width, height, memDc, 0, 0, SRCCOPY);
-
-        SelectObject(memDc, oldBitmap);
-        DeleteObject(bitmap);
-        DeleteDC(memDc);
         EndPaint(hwnd(), &ps);
         DebugSink::instance().send(L"UI", L"CandidateWindow::paint end");
-    }
-
-    void draw_background(Gdiplus::Graphics& g, int width, int height) {
-        const Gdiplus::RectF bounds(
-            0.5f, 0.5f, static_cast<Gdiplus::REAL>(width - 1), static_cast<Gdiplus::REAL>(height - 1));
-
-        Gdiplus::GraphicsPath panelPath(Gdiplus::FillModeWinding);
-        build_rounded_path(panelPath, bounds, static_cast<Gdiplus::REAL>(corner_radius));
-
-        Gdiplus::SolidBrush bgBrush(Gdiplus::Color(247, 247, 247));
-        Gdiplus::Pen borderPen(Gdiplus::Color(216, 216, 216), 1.0f);
-        g.FillPath(&bgBrush, &panelPath);
-        g.DrawPath(&borderPen, &panelPath);
-    }
-
-    void draw_candidates(Gdiplus::Graphics& g, int width) {
-        if (candidates_.empty()) {
-            DebugSink::instance().send(L"UI", L"CandidateWindow::draw_candidates skipped: empty");
-            return;
-        }
-        DebugSink::instance().send(
-            L"UI", L"CandidateWindow::draw_candidates count=" + std::to_wstring(candidates_.size()) +
-                      L", selection=" + std::to_wstring(selection_index_));
-
-        Gdiplus::Font indexFont(L"Segoe UI", 12.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-        Gdiplus::Font valueFont(L"Microsoft JhengHei UI", 20.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-
-        Gdiplus::SolidBrush indexBrush(Gdiplus::Color(102, 102, 102));
-        Gdiplus::SolidBrush valueBrush(Gdiplus::Color(33, 33, 33));
-        Gdiplus::SolidBrush selectionBrush(Gdiplus::Color(234, 234, 234));
-
-        Gdiplus::StringFormat centerFormat;
-        centerFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-        centerFormat.SetAlignment(Gdiplus::StringAlignmentNear);
-
-        const std::size_t columns = std::max<std::size_t>(1, std::min(layout_columns_, max_layout_columns));
-        const Gdiplus::REAL columnWidth =
-            (columns == 1) ? static_cast<Gdiplus::REAL>(width - 10)
-                           : static_cast<Gdiplus::REAL>((width - 10 - static_cast<int>((columns - 1) * 8)) / columns);
-
-        const int selection = static_cast<int>(selection_index_);
-        const int selectionRow = selection % page_size;
-        const int selectionCol = selection / page_size;
-        const Gdiplus::REAL selectionX = 5.0f + selectionCol * (columnWidth + 8.0f);
-        const int selectionTop = top_padding + selectionRow * row_height + 1;
-        const Gdiplus::RectF selectedRect(
-            selectionX, static_cast<Gdiplus::REAL>(selectionTop), columnWidth, static_cast<Gdiplus::REAL>(row_height - 2));
-        Gdiplus::GraphicsPath selectedPath(Gdiplus::FillModeWinding);
-        build_rounded_path(selectedPath, selectedRect, 5.0f);
-        g.FillPath(&selectionBrush, &selectedPath);
-
-        for (std::size_t i = 0; i < candidates_.size(); ++i) {
-            const int row = static_cast<int>(i % page_size);
-            const int col = static_cast<int>(i / page_size);
-            const Gdiplus::REAL left = 5.0f + col * (columnWidth + 8.0f);
-            const Gdiplus::REAL top = static_cast<Gdiplus::REAL>(top_padding + row * row_height);
-
-            if (col == static_cast<int>(number_column_)) {
-                const std::wstring index = std::to_wstring(row + 1);
-                const Gdiplus::RectF indexRect(left + 7.0f, top, 13.0f, static_cast<Gdiplus::REAL>(row_height));
-                g.DrawString(index.c_str(), -1, &indexFont, indexRect, &centerFormat, &indexBrush);
-            }
-
-            const Gdiplus::REAL textLeft = (col == static_cast<int>(number_column_)) ? (left + 25.0f) : (left + 8.0f);
-            const Gdiplus::RectF valueRect(
-                textLeft, top - 1.0f, columnWidth - (textLeft - left) - 6.0f, static_cast<Gdiplus::REAL>(row_height + 2));
-            g.DrawString(candidates_[i].c_str(), -1, &valueFont, valueRect, &centerFormat, &valueBrush);
-        }
-    }
-
-    void draw_bottom_bar(Gdiplus::Graphics& g, int width, int height) {
-        const int lineY = height - bottom_bar_height;
-        Gdiplus::Pen divider(Gdiplus::Color(218, 218, 218), 1.0f);
-        g.DrawLine(
-            &divider, 8.0f, static_cast<Gdiplus::REAL>(lineY), static_cast<Gdiplus::REAL>(width - 8),
-            static_cast<Gdiplus::REAL>(lineY));
-
-        Gdiplus::SolidBrush iconBrush(Gdiplus::Color(67, 67, 67));
-        const Gdiplus::PointF leftTriangle[3] = {{10.0f, static_cast<Gdiplus::REAL>(lineY + 10)},
-                                                 {16.0f, static_cast<Gdiplus::REAL>(lineY + 6)},
-                                                 {16.0f, static_cast<Gdiplus::REAL>(lineY + 14)}};
-        const Gdiplus::PointF rightTriangle[3] = {{30.0f, static_cast<Gdiplus::REAL>(lineY + 10)},
-                                                  {24.0f, static_cast<Gdiplus::REAL>(lineY + 6)},
-                                                  {24.0f, static_cast<Gdiplus::REAL>(lineY + 14)}};
-        g.FillPolygon(&iconBrush, leftTriangle, 3);
-        g.FillPolygon(&iconBrush, rightTriangle, 3);
-
-        Gdiplus::Pen outlinePen(Gdiplus::Color(74, 74, 74), 1.0f);
-        const Gdiplus::RectF enterRect(static_cast<Gdiplus::REAL>(width - 44), static_cast<Gdiplus::REAL>(lineY + 4),
-                                       14.0f, 11.0f);
-        g.DrawRectangle(&outlinePen, enterRect);
-        g.DrawLine(&outlinePen, static_cast<Gdiplus::REAL>(width - 40), static_cast<Gdiplus::REAL>(lineY + 10),
-                   static_cast<Gdiplus::REAL>(width - 34), static_cast<Gdiplus::REAL>(lineY + 10));
-        g.DrawLine(&outlinePen, static_cast<Gdiplus::REAL>(width - 36), static_cast<Gdiplus::REAL>(lineY + 8),
-                   static_cast<Gdiplus::REAL>(width - 34), static_cast<Gdiplus::REAL>(lineY + 10));
-        g.DrawLine(&outlinePen, static_cast<Gdiplus::REAL>(width - 36), static_cast<Gdiplus::REAL>(lineY + 12),
-                   static_cast<Gdiplus::REAL>(width - 34), static_cast<Gdiplus::REAL>(lineY + 10));
-
-        g.FillEllipse(
-            &iconBrush, static_cast<Gdiplus::REAL>(width - 18), static_cast<Gdiplus::REAL>(lineY + 7), 6.0f,
-            6.0f);
     }
 
 private:
@@ -451,6 +673,9 @@ private:
     std::size_t selection_index_ = 0;
     std::size_t layout_columns_ = 1;
     std::size_t number_column_ = 0;
+    bool can_prev_page_ = false;
+    bool can_next_page_ = false;
+    XamlIslandHost xaml_island_;
 };
 
 }  // namespace tsf

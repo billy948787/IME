@@ -223,7 +223,6 @@ STDMETHODIMP TextService::OnTestKeyUp(ITfContext* /*pContext*/, WPARAM /*wParam*
  * Updates the active composition or handles commit and cancel keys.
  */
 STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM /*lParam*/, BOOL* pfEaten) {
-    winrt::check_hresult(-1);
     if (!pfEaten) return E_INVALIDARG;
     *pfEaten = FALSE;
     DebugSink::instance().send(L"EVENT", L"OnKeyDown");

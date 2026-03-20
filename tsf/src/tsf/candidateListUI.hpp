@@ -349,11 +349,13 @@ private:
             offset = std::min(selection_index - current_begin, current_end - current_begin - 1);
         }
 
+        const UINT pages = page_count();
         const UINT number_column = current_page - start_page;
         const UINT local_selection = number_column * page_size + offset;
 
         candidate_window.set_layout_columns(visible_pages);
         candidate_window.set_number_column(number_column);
+        candidate_window.set_page_navigation(current_page > 0, current_page + 1 < pages);
         candidate_window.update_candidates(page_items);
         candidate_window.set_selection(local_selection);
 
