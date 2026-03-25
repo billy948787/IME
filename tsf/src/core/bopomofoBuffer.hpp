@@ -29,7 +29,7 @@ public:
         } else {
             // temporary fallback
             DebugSink::instance().send(L"MSG", bopomofo);
-            return L"操";
+            return L"找不到";
         }
     }
     std::vector<std::wstring> lookup_all(const std::wstring& bopomofo) {
@@ -38,7 +38,7 @@ public:
         } else {
             // temporary fallback
             DebugSink::instance().send(L"MSG", bopomofo);
-            return {L"操"};
+            return {L"找不到"};
         }
     }
 

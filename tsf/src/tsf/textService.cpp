@@ -1,7 +1,8 @@
 #include "textService.h"
 
+#include "candidateUiController.hpp"
 #include "core/bopomofo.hpp"
-#include "core/engine.hpp"
+#include "editSession.hpp"
 #include "system/globals.h"
 #include "utils/debugSink.hpp"
 #include "utils/healper.hpp"
@@ -190,6 +191,10 @@ HRESULT apply_composition_display_attribute(ITfContext* context, TfEditCookie ec
 
 namespace tsf {
 
+TextService::TextService() : candidate_ui_(std::make_unique<CandidateUiController>()) {}
+
+TextService::~TextService() = default;
+
 /**
  * @brief Implements ITfTextInputProcessor::Activate.
  *
@@ -228,6 +233,7 @@ HRESULT TextService::activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId) {
 
     threadMgr.copy_from(pThreadMgr);
     _tfClientId = tfClientId;
+    candidate_ui_->attach(pThreadMgr, tfClientId);
 
     winrt::com_ptr<ITfSource> itfSource;
     HRESULT hr = threadMgr->QueryInterface<ITfSource>(itfSource.put());
@@ -269,7 +275,7 @@ HRESULT TextService::activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId) {
  */
 void TextService::deactivate() {
     DebugSink::instance().send(L"IME", L"Deactivated");
-    hide_candidate_list();
+    candidate_ui_->hide();
     DebugSink::instance().disconnect();
 
     if (itfComposition) {
@@ -295,6 +301,7 @@ void TextService::deactivate() {
         threadMgr = nullptr;
     }
     _tfClientId = TF_CLIENTID_NULL;
+    candidate_ui_->detach();
 }
 
 /**
@@ -361,8 +368,8 @@ STDMETHODIMP TextService::OnTestKeyDown(ITfContext* /*pContext*/, WPARAM wParam,
     if (!pfEaten) return E_INVALIDARG;
     DebugSink::instance().send(L"EVENT", L"OnTestKeyDown key=" + std::to_wstring(wParam));
 
-    if (candidate_ui_is_active()) {
-        *pfEaten = candidateListUIElement->can_handle_key(wParam) ? TRUE : FALSE;
+    if (candidate_ui_->is_active()) {
+        *pfEaten = candidate_ui_->can_handle_key(wParam) ? TRUE : FALSE;
         DebugSink::instance().send(
             L"EVENT", L"OnTestKeyDown candidate mode, eaten=" + std::wstring(*pfEaten ? L"TRUE" : L"FALSE"));
         return S_OK;
@@ -402,8 +409,23 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     *pfEaten = FALSE;
     DebugSink::instance().send(L"EVENT", L"OnKeyDown");
 
-    if (handle_candidate_ui_key(pContext, wParam, pfEaten)) {
-        return S_OK;
+    if (candidate_ui_->is_active()) {
+        const CandidateKeyResult result = candidate_ui_->handle_key(wParam);
+        switch (result) {
+            case CandidateKeyResult::navigated:
+                *pfEaten = TRUE;
+                return S_OK;
+            case CandidateKeyResult::finalized:
+                refresh_composition_after_candidate_finalize(pContext);
+                *pfEaten = TRUE;
+                return S_OK;
+            case CandidateKeyResult::aborted:
+                *pfEaten = TRUE;
+                return S_OK;
+            case CandidateKeyResult::not_handled:
+            default:
+                break;
+        }
     }
 
     if (wParam == VK_RETURN && !compositionBuffer.empty()) {
@@ -446,7 +468,7 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     }
     auto cur_char = Bopomofo::lookup(static_cast<int>(wParam));
     if (cur_char == std::nullopt) {
-        hide_candidate_list();
+        candidate_ui_->hide();
         // TODO: Handle non-Bopomofo keys.
         *pfEaten = FALSE;
         return S_OK;
@@ -490,7 +512,7 @@ STDMETHODIMP TextService::OnPreservedKey(ITfContext* /*pContext*/, REFGUID /*rgu
  * Clears local composition state when TSF ends the composition externally.
  */
 STDMETHODIMP TextService::OnCompositionTerminated(TfEditCookie /*ecWrite*/, ITfComposition* /*pComposition*/) {
-    hide_candidate_list();
+    candidate_ui_->hide();
     itfComposition = nullptr;
     compositionBuffer.clear();
     return S_OK;
@@ -576,7 +598,7 @@ HRESULT TextService::start_composition(ITfContext* pContext) {
  * Clears the current composition object and buffered text.
  */
 HRESULT TextService::end_composition(ITfContext* pContext) {
-    hide_candidate_list();
+    candidate_ui_->hide();
     if (!itfComposition) return S_OK;
 
     winrt::com_ptr<EditSession> editSession = winrt::make_self<EditSession>();
@@ -641,38 +663,6 @@ HRESULT TextService::set_composition_text(ITfContext* pContext, const std::wstri
     return S_OK;
 }
 
-bool TextService::candidate_ui_is_active() const {
-    return candidateListUIElement && candidateListUIElement->is_shown();
-}
-
-bool TextService::handle_candidate_ui_key(ITfContext* pContext, WPARAM wParam, BOOL* pfEaten) {
-    if (!candidate_ui_is_active()) {
-        return false;
-    }
-
-    DebugSink::instance().send(L"INFO", L"handle_candidate_ui_key key=" + std::to_wstring(wParam));
-
-    const CandidateKeyResult result = candidateListUIElement->handle_key(wParam);
-    switch (result) {
-        case CandidateKeyResult::navigated:
-            *pfEaten = TRUE;
-            return true;
-        case CandidateKeyResult::finalized:
-            refresh_composition_after_candidate_finalize(pContext);
-            *pfEaten = TRUE;
-            return true;
-        case CandidateKeyResult::aborted:
-            hide_candidate_list();
-            *pfEaten = TRUE;
-            return true;
-        case CandidateKeyResult::not_handled:
-        default:
-            DebugSink::instance().send(L"INFO", L"handle_candidate_ui_key not handled -> hide candidate list");
-            hide_candidate_list();
-            return false;
-    }
-}
-
 void TextService::refresh_composition_after_candidate_finalize(ITfContext* pContext) {
     if (!pContext || compositionBuffer.empty()) {
         return;
@@ -691,106 +681,24 @@ void TextService::show_candidate_list_for_current_input(ITfContext* pContext, bo
     auto& target = compositionBuffer.back();
     if (std::holds_alternative<Word>(target)) {
         show_candidate_list(
-            pContext, target, WordMappingEngine::instance().lookup_all(std::get<Word>(target).bopomofo));
+            target, WordMappingEngine::instance().lookup_all(std::get<Word>(target).bopomofo), pContext);
     } else {
-        show_candidate_list(pContext, target,
-                            WordMappingEngine::instance().lookup_all(std::get<CompositionUnit>(target).get_bopomofo()));
+        show_candidate_list(
+            target, WordMappingEngine::instance().lookup_all(std::get<CompositionUnit>(target).get_bopomofo()),
+            pContext);
     }
 
     if (expand) {
-        candidateListUIElement->expand();
+        candidate_ui_->expand();
     }
-}
-
-bool TextService::query_candidate_anchor(ITfContext* pContext, POINT* anchor) {
-    if (!pContext || !anchor) {
-        return false;
-    }
-
-    winrt::com_ptr<ITfContextView> contextView;
-    HRESULT hr = pContext->GetActiveView(contextView.put());
-    if (FAILED(hr) || !contextView) {
-        return false;
-    }
-
-    POINT point = {};
-    bool found = false;
-    winrt::com_ptr<EditSession> editSession = winrt::make_self<EditSession>();
-    editSession->set_operation([pContext, contextView, &point, &found](TfEditCookie ec) {
-        TF_SELECTION selection = {};
-        ULONG fetched = 0;
-        const HRESULT hrSelection = pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &selection, &fetched);
-        if (FAILED(hrSelection) || fetched == 0 || !selection.range) {
-            return;
-        }
-
-        winrt::com_ptr<ITfRange> range;
-        range.attach(selection.range);
-
-        RECT rc = {};
-        BOOL clipped = FALSE;
-        const HRESULT hrTextExt = contextView->GetTextExt(ec, range.get(), &rc, &clipped);
-        if (FAILED(hrTextExt)) {
-            return;
-        }
-
-        point.x = rc.left;
-        point.y = rc.bottom;
-        found = true;
-    });
-
-    HRESULT hrSession = E_FAIL;
-    hr = pContext->RequestEditSession(_tfClientId, editSession.get(), TF_ES_READ | TF_ES_SYNC, &hrSession);
-    if (FAILED(hr) || FAILED(hrSession)) {
-        return false;
-    }
-
-    if (!found) {
-        return false;
-    }
-
-    *anchor = point;
-    return true;
-}
-
-void TextService::hide_candidate_list() {
-    candidateListUIElement->Show(FALSE);
-    candidateListUIElement->clear_anchor_point();
-
-    if (dwUIElementId == TF_INVALID_COOKIE) {
-        return;
-    }
-
-    if (threadMgr) {
-        winrt::com_ptr<ITfUIElementMgr> itfUIElementMgr;
-        const HRESULT hr = threadMgr->QueryInterface<ITfUIElementMgr>(itfUIElementMgr.put());
-        if (SUCCEEDED(hr) && itfUIElementMgr) {
-            itfUIElementMgr->EndUIElement(dwUIElementId);
-        }
-    }
-
-    dwUIElementId = TF_INVALID_COOKIE;
 }
 
 /**
  * @brief Displays the candidate list UI with the given candidates.
  */
-void TextService::show_candidate_list(ITfContext* pContext, std::variant<Word, CompositionUnit>& pos,
-                                      const std::vector<std::wstring>& candidates) {
-    winrt::com_ptr<ITfUIElementMgr> itfUIElementMgr;
-    HRESULT hr = threadMgr->QueryInterface<ITfUIElementMgr>(itfUIElementMgr.put());
-    if (FAILED(hr)) {
-        return;
-    }
-
-    POINT anchor = {};
-    if (query_candidate_anchor(pContext, &anchor)) {
-        candidateListUIElement->set_anchor_point(anchor);
-    } else {
-        candidateListUIElement->clear_anchor_point();
-    }
-
-    candidateListUIElement->update(candidates, [this, itfUIElementMgr, &pos](std::wstring word) {
+void TextService::show_candidate_list(std::variant<Word, CompositionUnit>& pos,
+                                      const std::vector<std::wstring>& candidates, ITfContext* pContext) {
+    candidate_ui_->show(pContext, candidates, [&pos](std::wstring word) {
         if (std::holds_alternative<Word>(pos)) {
             auto& w = std::get<Word>(pos);
             w.word = word;
@@ -798,26 +706,7 @@ void TextService::show_candidate_list(ITfContext* pContext, std::variant<Word, C
             auto& v = std::get<CompositionUnit>(pos);
             pos = Word(word, v.get_bopomofo());
         }
-        itfUIElementMgr->EndUIElement(dwUIElementId);
-        dwUIElementId = TF_INVALID_COOKIE;
-        candidateListUIElement->Show(FALSE);
-        candidateListUIElement->clear_anchor_point();
     });
-
-    if (candidate_ui_is_active()) {
-        const HRESULT update_hr = itfUIElementMgr->UpdateUIElement(dwUIElementId);
-        const HRESULT show_hr = candidateListUIElement->Show(TRUE);
-        return;
-    }
-
-    BOOL bShow = TRUE;
-    hr = itfUIElementMgr->BeginUIElement(candidateListUIElement.get(), &bShow, &dwUIElementId);
-    if (FAILED(hr)) {
-        return;
-    }
-    if (bShow) {
-        candidateListUIElement->Show(TRUE);
-    }
 }
 
 }  // namespace tsf
