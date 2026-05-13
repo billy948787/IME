@@ -1,5 +1,7 @@
 #include "textService.h"
 
+#include <array>
+
 #include "candidateUiController.hpp"
 #include "core/bopomofo.hpp"
 #include "editSession.hpp"
@@ -316,9 +318,7 @@ void TextService::deactivate() {
  *
  * No document-manager initialization is required yet.
  */
-STDMETHODIMP TextService::OnInitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try {
-    return S_OK;
-} catch (...) {
+STDMETHODIMP TextService::OnInitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try { return S_OK; } catch (...) {
     return handle_com_exception();
 }
 
@@ -327,9 +327,7 @@ STDMETHODIMP TextService::OnInitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try {
  *
  * No document-manager teardown is required yet.
  */
-STDMETHODIMP TextService::OnUninitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try {
-    return S_OK;
-} catch (...) {
+STDMETHODIMP TextService::OnUninitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try { return S_OK; } catch (...) {
     return handle_com_exception();
 }
 
@@ -338,8 +336,7 @@ STDMETHODIMP TextService::OnUninitDocumentMgr(ITfDocumentMgr* /*pDocMgr*/) try {
  *
  * Receives document focus changes but does not react to them yet.
  */
-STDMETHODIMP TextService::OnSetFocus(ITfDocumentMgr* /*pDocMgrFocus*/,
-                                     ITfDocumentMgr* /*pDocMgrPrevFocus*/) try {
+STDMETHODIMP TextService::OnSetFocus(ITfDocumentMgr* /*pDocMgrFocus*/, ITfDocumentMgr* /*pDocMgrPrevFocus*/) try {
     // TODO: Initialize or clear per-document state on focus switch.
     return S_OK;
 } catch (...) {
@@ -351,9 +348,7 @@ STDMETHODIMP TextService::OnSetFocus(ITfDocumentMgr* /*pDocMgrFocus*/,
  *
  * Accepts new contexts without additional bookkeeping.
  */
-STDMETHODIMP TextService::OnPushContext(ITfContext* /*pContext*/) try {
-    return S_OK;
-} catch (...) {
+STDMETHODIMP TextService::OnPushContext(ITfContext* /*pContext*/) try { return S_OK; } catch (...) {
     return handle_com_exception();
 }
 
@@ -362,9 +357,7 @@ STDMETHODIMP TextService::OnPushContext(ITfContext* /*pContext*/) try {
  *
  * Releases contexts without additional cleanup.
  */
-STDMETHODIMP TextService::OnPopContext(ITfContext* /*pContext*/) try {
-    return S_OK;
-} catch (...) {
+STDMETHODIMP TextService::OnPopContext(ITfContext* /*pContext*/) try { return S_OK; } catch (...) {
     return handle_com_exception();
 }
 
@@ -373,9 +366,7 @@ STDMETHODIMP TextService::OnPopContext(ITfContext* /*pContext*/) try {
  *
  * Tracks foreground changes but currently keeps no extra state.
  */
-STDMETHODIMP TextService::OnSetFocus(BOOL /*fForeground*/) try {
-    return S_OK;
-} catch (...) {
+STDMETHODIMP TextService::OnSetFocus(BOOL /*fForeground*/) try { return S_OK; } catch (...) {
     return handle_com_exception();
 }
 
@@ -384,8 +375,7 @@ STDMETHODIMP TextService::OnSetFocus(BOOL /*fForeground*/) try {
  *
  * Reports whether the service intends to consume the key-down event.
  */
-STDMETHODIMP TextService::OnTestKeyDown(ITfContext* /*pContext*/, WPARAM wParam, LPARAM /*lParam*/,
-                                        BOOL* pfEaten) try {
+STDMETHODIMP TextService::OnTestKeyDown(ITfContext* /*pContext*/, WPARAM wParam, LPARAM /*lParam*/, BOOL* pfEaten) try {
     if (!pfEaten) return E_INVALIDARG;
     DebugSink::instance().send(L"EVENT", L"OnTestKeyDown key=" + std::to_wstring(wParam));
 
@@ -504,6 +494,7 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     //     start_composition(pContext);
     // }
     compositionBuffer.add(cur_char.value());
+    compositionBuffer.predict_paddings(get_pre_composit_context(pContext));
     DebugSink::instance().send(L"KEY", compositionBuffer.to_string());
     set_composition_text(pContext, compositionBuffer.to_string());
     *pfEaten = TRUE;
@@ -517,8 +508,7 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
  *
  * Leaves key-up events unconsumed after key-down handling.
  */
-STDMETHODIMP TextService::OnKeyUp(ITfContext* /*pContext*/, WPARAM /*wParam*/, LPARAM /*lParam*/,
-                                  BOOL* pfEaten) try {
+STDMETHODIMP TextService::OnKeyUp(ITfContext* /*pContext*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL* pfEaten) try {
     if (!pfEaten) return E_INVALIDARG;
     *pfEaten = FALSE;
     return S_OK;
@@ -747,6 +737,58 @@ void TextService::show_candidate_list(BopomofoPos& bopomofoPos, ITfContext* pCon
             }
         }
     });
+}
+
+inline constexpr LONG kMaxPreCompositionContextChars = 256;
+inline constexpr ULONG kRangeReadChunkChars = 64;
+
+std::u16string TextService::get_pre_composit_context(ITfContext* pContext) {
+    if (!pContext) {
+        return {};
+    }
+
+    std::u16string context;
+    winrt::com_ptr<EditSession> editSession = winrt::make_self<EditSession>();
+    editSession->set_operation([this, pContext, &context](TfEditCookie ec) {
+        winrt::com_ptr<ITfRange> anchor_range;
+
+        if (itfComposition) {
+            itfComposition->GetRange(anchor_range.put()) | win::check();
+        } else {
+            TF_SELECTION selection = {};
+            ULONG fetched = 0;
+            pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &selection, &fetched) | win::check();
+            if (fetched == 0 || !selection.range) {
+                return;
+            }
+
+            anchor_range.attach(selection.range);
+        }
+
+        anchor_range->Collapse(ec, TF_ANCHOR_START) | win::check();
+
+        LONG shifted = 0;
+        anchor_range->ShiftStart(ec, -kMaxPreCompositionContextChars, &shifted, nullptr) | win::check();
+
+        std::array<WCHAR, kRangeReadChunkChars> chunk = {};
+        while (true) {
+            ULONG copied = 0;
+            anchor_range->GetText(ec, TF_TF_MOVESTART, chunk.data(), static_cast<ULONG>(chunk.size()), &copied) |
+                win::check();
+            if (copied == 0) {
+                break;
+            }
+
+            context.append(reinterpret_cast<const char16_t*>(chunk.data()), copied);
+            if (copied < chunk.size()) {
+                break;
+            }
+        }
+    });
+
+    HRESULT hr = S_OK;
+    pContext->RequestEditSession(_tfClientId, editSession.get(), TF_ES_READ | TF_ES_SYNC, &hr) | win::check();
+    return context;
 }
 
 }  // namespace tsf

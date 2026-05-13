@@ -197,7 +197,8 @@ struct BopomofoPos {
     char16_t initial = 0, medial = 0, final = 0;
     char16_t tone = 0;
     int choose_index = 0;
-    bool chosen = false;  // user 手動選擇
+    bool chosen = false;     // user 手動選擇
+    bool predicted = false;  // engine 預測
     bool compositable = false;
     std::vector<char32_t> candidates;
 

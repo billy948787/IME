@@ -3,6 +3,7 @@
 #include <llama-cpp.h>
 #include <utf8/cpp20.h>
 
+#include <chrono>
 #include <fstream>
 #include <jsoncons/basic_json.hpp>
 #include <span>
@@ -12,6 +13,7 @@
 #include "core/bopomofo.hpp"
 #include "engine.h"
 #include "tokenizer.hpp"
+#include "utils/healper.hpp"
 
 using std::literals::operator""s;
 
@@ -68,6 +70,13 @@ public:
     ~LlamaEngine() {}
 
     void predict(const std::u16string &context, std::span<BopomofoPos> padding /* in out */) override {
+        const auto start = std::chrono::steady_clock::now();
+        before_return log_predict_time([start]() {
+            const auto end = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            DebugSink::instance().send(L"INFO", std::format("predict took {} ms", elapsed));
+        });
+
         // TEMP
         llama_memory_clear(llama_get_memory(llama_ctx.get()), true);
         ctx = Tokenizer::instance().tokenize(context, padding);
@@ -103,13 +112,18 @@ public:
             }
             // debug print candidate and prob
             std::string debug_str;
+            int count = 0;
             for (auto &[token, prob] : prob_res) {
                 std::string s;
                 utf8::append(inv_mapping[token], s);
                 debug_str += s + " : " + std::to_string(prob) + ", ";
+                if (++count >= 5) {
+                    break;
+                }
             }
             DebugSink::instance().send(L"INFO", debug_str);
             padd.set_candaiates(new_candidate);
+            padd.predicted = true;
         }
     }
 

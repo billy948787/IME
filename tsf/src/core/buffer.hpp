@@ -72,14 +72,26 @@ public:
         } else {
             // current accept this ch
             if (buffer[idx].is_compositable()) {
-                std::u16string ctx;
-                for (int i = 0; i < idx; i++) {
-                    ctx += buffer[i].current();
-                }
-                DebugSink::instance().send(L"INFO", u"CONTEXT : " + ctx);
                 auto engine = get_engine();
                 engine->predict(u"", std::span<BopomofoPos>(buffer.begin(), buffer.begin() + idx + 1));
             }
+        }
+    }
+    void predict_paddings(std::u16string context) {
+        DebugSink::instance().send(L"INFO", u"context : " + context);
+        if (buffer[idx].is_compositable()) {
+            bool need_predict = false;
+            for (int i = idx; i >= 0; i--) {
+                if (!buffer[i].predicted) {
+                    need_predict = true;
+                    break;
+                }
+            }
+            if (!need_predict) {
+                return;
+            }
+            auto engine = get_engine();
+            engine->predict(context, std::span<BopomofoPos>(buffer.begin(), buffer.begin() + idx + 1));
         }
     }
     BopomofoPos& cur() {

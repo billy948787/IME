@@ -69,6 +69,7 @@ private:
     void refresh_composition_after_candidate_finalize(ITfContext* pContext);
     void show_candidate_list_for_current_input(ITfContext* pContext, bool expand);
     void show_candidate_list(BopomofoPos& pos, ITfContext* pContext);
+    std::u16string get_pre_composit_context(ITfContext* pContext);
 
     winrt::com_ptr<ITfThreadMgr> threadMgr;
     TfClientId _tfClientId = TF_CLIENTID_NULL;
