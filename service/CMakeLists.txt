@@ -6,15 +6,25 @@ include_directories(src)
 add_executable(IME_Service ${SOURCES} ${HEADERS})
 
 set(ONNXRUNTIME_NUGET_PACKAGE "Microsoft.ML.OnnxRuntime.DirectML" CACHE STRING
-    "ONNX Runtime package used by IME_Service for headers/import library on this machine")
+    "Fallback ONNX Runtime NuGet package used by IME_Service for headers/import library")
 set(ONNXRUNTIME_NUGET_VERSION "1.24.4" CACHE STRING
-    "ONNX Runtime NuGet package version used by IME_Service")
+    "Fallback ONNX Runtime NuGet package version used by IME_Service")
 set(ONNXRUNTIME_NUGET_ROOT
     "$ENV{USERPROFILE}/.nuget/packages/microsoft.ml.onnxruntime.directml/${ONNXRUNTIME_NUGET_VERSION}"
-    CACHE PATH "Root directory of the restored ONNX Runtime package")
+    CACHE PATH "Root directory of the fallback ONNX Runtime NuGet package")
+set(ONNXRUNTIME_ROOT "" CACHE PATH
+    "Root directory of an ONNX Runtime install. Prefer Ryzen AI/VitisAI ONNX Runtime for NPU builds.")
 option(IMESVC_COPY_ONNXRUNTIME_DLLS
-    "Copy ONNX Runtime DLLs next to IME_Service. Keep this OFF for Ryzen AI/VitisAI deployments so the Ryzen AI runtime DLLs are used."
-    OFF)
+    "Copy ONNX Runtime DLLs next to IME_Service so Windows loads the intended Ryzen AI/VitisAI runtime."
+    ON)
+
+if(NOT ONNXRUNTIME_ROOT)
+    if(EXISTS "C:/Program Files/RyzenAI/1.7.1/onnxruntime/lib/onnxruntime.lib")
+        set(ONNXRUNTIME_ROOT "C:/Program Files/RyzenAI/1.7.1/onnxruntime" CACHE PATH
+            "Root directory of an ONNX Runtime install. Prefer Ryzen AI/VitisAI ONNX Runtime for NPU builds."
+            FORCE)
+    endif()
+endif()
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     if(CMAKE_VS_PLATFORM_NAME MATCHES "ARM64")
@@ -26,9 +36,26 @@ else()
     set(ONNXRUNTIME_RUNTIME_ID "")
 endif()
 
-set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_NUGET_ROOT}/build/native/include")
-set(ONNXRUNTIME_NATIVE_DIR "${ONNXRUNTIME_NUGET_ROOT}/runtimes/${ONNXRUNTIME_RUNTIME_ID}/native")
-set(ONNXRUNTIME_LIB "${ONNXRUNTIME_NATIVE_DIR}/onnxruntime.lib")
+if(ONNXRUNTIME_ROOT)
+    if(EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session/onnxruntime_cxx_api.h")
+        set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
+    else()
+        set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include")
+    endif()
+    get_filename_component(ONNXRUNTIME_INSTALL_ROOT "${ONNXRUNTIME_ROOT}" DIRECTORY)
+    if(EXISTS "${ONNXRUNTIME_INSTALL_ROOT}/deployment/onnxruntime.dll")
+        set(ONNXRUNTIME_NATIVE_DIR "${ONNXRUNTIME_INSTALL_ROOT}/deployment")
+    elseif(EXISTS "${ONNXRUNTIME_ROOT}/bin/onnxruntime.dll")
+        set(ONNXRUNTIME_NATIVE_DIR "${ONNXRUNTIME_ROOT}/bin")
+    else()
+        set(ONNXRUNTIME_NATIVE_DIR "${ONNXRUNTIME_ROOT}/lib")
+    endif()
+    set(ONNXRUNTIME_LIB "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib")
+else()
+    set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_NUGET_ROOT}/build/native/include")
+    set(ONNXRUNTIME_NATIVE_DIR "${ONNXRUNTIME_NUGET_ROOT}/runtimes/${ONNXRUNTIME_RUNTIME_ID}/native")
+    set(ONNXRUNTIME_LIB "${ONNXRUNTIME_NATIVE_DIR}/onnxruntime.lib")
+endif()
 
 if(ONNXRUNTIME_RUNTIME_ID AND EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_cxx_api.h" AND EXISTS "${ONNXRUNTIME_LIB}")
     target_compile_definitions(IME_Service PRIVATE IMESVC_ENABLE_ONNX=1)
@@ -36,20 +63,18 @@ if(ONNXRUNTIME_RUNTIME_ID AND EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_cxx
     target_link_libraries(IME_Service PRIVATE "${ONNXRUNTIME_LIB}")
 
     if(IMESVC_COPY_ONNXRUNTIME_DLLS)
+        file(GLOB ONNXRUNTIME_RUNTIME_DLLS CONFIGURE_DEPENDS "${ONNXRUNTIME_NATIVE_DIR}/*.dll")
         add_custom_command(TARGET IME_Service POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${ONNXRUNTIME_NATIVE_DIR}/onnxruntime.dll"
-                "$<TARGET_FILE_DIR:IME_Service>/onnxruntime.dll"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${ONNXRUNTIME_NATIVE_DIR}/onnxruntime_providers_shared.dll"
-                "$<TARGET_FILE_DIR:IME_Service>/onnxruntime_providers_shared.dll"
+                ${ONNXRUNTIME_RUNTIME_DLLS}
+                "$<TARGET_FILE_DIR:IME_Service>"
         )
     endif()
 else()
     target_compile_definitions(IME_Service PRIVATE IMESVC_ENABLE_ONNX=0)
     message(WARNING
         "ONNX Runtime native files were not found; ONNX backend is disabled. "
-        "Expected package root: ${ONNXRUNTIME_NUGET_ROOT}"
+        "Checked ONNXRUNTIME_ROOT='${ONNXRUNTIME_ROOT}' and fallback package root='${ONNXRUNTIME_NUGET_ROOT}'"
     )
 endif()
 

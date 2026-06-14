@@ -39,17 +39,12 @@ class OnnxModelManager {
 
     Ort::Env _env;
     Ort::AllocatorWithDefaultOptions _allocator;
-    SessionBundle _prefill;
     SessionBundle _decode;
-    std::vector<std::string> _kv_output_names;
+    std::vector<std::string> _kv_cache_names;
     std::unordered_map<std::string, size_t> _decode_past_input_to_cache_index;
 
-    static std::filesystem::path resolve_prefill_path(std::source_location loc = std::source_location::current()) {
-        return project_root(loc) / "models" / "onnx" / "ime_llama_prefill_xint8.onnx";
-    }
-
     static std::filesystem::path resolve_decode_path(std::source_location loc = std::source_location::current()) {
-        return project_root(loc) / "models" / "onnx" / "ime_llama_decode_xint8.onnx";
+        return project_root(loc) / "models" / "onnx-npu" / "ime_llama_decode_manual_xint8_s1024.onnx";
     }
 
     static bool starts_with(std::string_view text, std::string_view prefix) {
@@ -110,6 +105,7 @@ class OnnxModelManager {
         options.SetIntraOpNumThreads(8);
         options.SetInterOpNumThreads(1);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        options.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
         append_vitisai(options, cache_key);
         return options;
     }
@@ -137,39 +133,33 @@ class OnnxModelManager {
     }
 
     void load_sessions() {
-        auto prefill_options = make_session_options("ime_llama_prefill_xint8");
-        auto decode_options = make_session_options("ime_llama_decode_xint8");
-        const auto prefill_path = resolve_prefill_path();
+        auto decode_options = make_session_options("ime_llama_decode_manual_xint8_s1024");
         const auto decode_path = resolve_decode_path();
 
-        std::cerr << "[SRV] loading ONNX prefill model: " << prefill_path.string() << std::endl;
-        _prefill.session = Ort::Session(_env, prefill_path.wstring().c_str(), prefill_options);
-        std::cerr << "[SRV] loading ONNX decode model: " << decode_path.string() << std::endl;
+        std::cerr << "[SRV] loading ONNX NPU decode model: " << decode_path.string() << std::endl;
         _decode.session = Ort::Session(_env, decode_path.wstring().c_str(), decode_options);
 
-        _prefill.input_names = read_names(_prefill.session, _allocator, true);
-        _prefill.output_names = read_names(_prefill.session, _allocator, false);
         _decode.input_names = read_names(_decode.session, _allocator, true);
         _decode.output_names = read_names(_decode.session, _allocator, false);
     }
 
     void build_cache_name_map() {
-        _kv_output_names.clear();
+        _kv_cache_names.clear();
         _decode_past_input_to_cache_index.clear();
 
-        for (size_t i = 1; i < _prefill.output_names.size(); ++i) {
-            if (starts_with(_prefill.output_names[i], "present_")) {
-                _kv_output_names.push_back(_prefill.output_names[i]);
+        for (size_t i = 1; i < _decode.output_names.size(); ++i) {
+            if (starts_with(_decode.output_names[i], "present_")) {
+                _kv_cache_names.push_back(_decode.output_names[i]);
             }
         }
 
-        if (_kv_output_names.empty()) {
-            throw std::runtime_error("ONNX prefill model did not expose present_key/value outputs");
+        if (_kv_cache_names.empty()) {
+            throw std::runtime_error("ONNX decode model did not expose present_key/value outputs");
         }
 
         std::unordered_map<std::string, size_t> present_index;
-        for (size_t i = 0; i < _kv_output_names.size(); ++i) {
-            present_index[_kv_output_names[i]] = i;
+        for (size_t i = 0; i < _kv_cache_names.size(); ++i) {
+            present_index[_kv_cache_names[i]] = i;
         }
 
         for (const auto& name : _decode.input_names) {
@@ -177,13 +167,13 @@ class OnnxModelManager {
             const std::string present_name = "present_" + name.substr(std::string_view("past_").size());
             const auto it = present_index.find(present_name);
             if (it == present_index.end()) {
-                throw std::runtime_error("decode past input has no matching prefill present output: " + name);
+                throw std::runtime_error("decode past input has no matching present output: " + name);
             }
             _decode_past_input_to_cache_index[name] = it->second;
         }
 
-        if (_decode_past_input_to_cache_index.size() != _kv_output_names.size()) {
-            throw std::runtime_error("ONNX decode model past inputs do not match prefill present outputs");
+        if (_decode_past_input_to_cache_index.size() != _kv_cache_names.size()) {
+            throw std::runtime_error("ONNX decode model past inputs do not match present outputs");
         }
     }
 
@@ -200,17 +190,14 @@ public:
     OnnxModelManager() : _env(ORT_LOGGING_LEVEL_WARNING, "IME_Service") {
         load_sessions();
 
-        if (_prefill.input_names.empty() || _prefill.output_names.empty() || _decode.input_names.empty() ||
-            _decode.output_names.empty()) {
-            throw std::runtime_error("ONNX prefill/decode models must have inputs and outputs");
+        if (_decode.input_names.empty() || _decode.output_names.empty()) {
+            throw std::runtime_error("ONNX decode model must have inputs and outputs");
         }
 
         build_cache_name_map();
-        log_names("[SRV] ONNX prefill inputs=", _prefill.input_names);
-        log_names("[SRV] ONNX prefill outputs=", _prefill.output_names);
         log_names("[SRV] ONNX decode inputs=", _decode.input_names);
         log_names("[SRV] ONNX decode outputs=", _decode.output_names);
-        std::cerr << "[SRV] ONNX KV model loaded kv_tensors=" << _kv_output_names.size() << std::endl;
+        std::cerr << "[SRV] ONNX NPU decode-only KV model loaded kv_tensors=" << _kv_cache_names.size() << std::endl;
     }
 
     static void initialize() {
@@ -222,20 +209,8 @@ public:
         return manager;
     }
 
-    Ort::Session& prefill_session() {
-        return _prefill.session;
-    }
-
     Ort::Session& decode_session() {
         return _decode.session;
-    }
-
-    std::vector<const char*> prefill_input_ptrs() const {
-        return name_ptrs(_prefill.input_names);
-    }
-
-    std::vector<const char*> prefill_output_ptrs() const {
-        return name_ptrs(_prefill.output_names);
     }
 
     std::vector<const char*> decode_input_ptrs() const {
@@ -244,10 +219,6 @@ public:
 
     std::vector<const char*> decode_output_ptrs() const {
         return name_ptrs(_decode.output_names);
-    }
-
-    const std::vector<std::string>& prefill_input_names() const {
-        return _prefill.input_names;
     }
 
     const std::vector<std::string>& decode_input_names() const {
@@ -263,7 +234,7 @@ public:
     }
 
     size_t kv_tensor_count() const {
-        return _kv_output_names.size();
+        return _kv_cache_names.size();
     }
 };
 
@@ -275,11 +246,9 @@ class OnnxEngine : public IEngine {
     struct PredictTiming {
         long long tokenize_us = 0;
         long long cache_us = 0;
-        long long prefill_us = 0;
         long long decode_us = 0;
         long long candidate_us = 0;
         long long mask_us = 0;
-        size_t prefill_calls = 0;
         size_t decode_calls = 0;
         size_t cache_tokens = 0;
         size_t candidate_tokens = 0;
@@ -376,9 +345,8 @@ private:
     static void print_timing(const PredictTiming& timing) {
         std::cout << std::fixed << std::setprecision(3) << "[TIME] onnx_kv_detail_ms"
                   << " tokenize=" << ms(timing.tokenize_us) << " cache_total=" << ms(timing.cache_us)
-                  << " prefill=" << ms(timing.prefill_us) << " decode=" << ms(timing.decode_us)
-                  << " candidate=" << ms(timing.candidate_us) << " mask=" << ms(timing.mask_us)
-                  << " prefill_calls=" << timing.prefill_calls << " decode_calls=" << timing.decode_calls
+                  << " decode=" << ms(timing.decode_us) << " candidate=" << ms(timing.candidate_us)
+                  << " mask=" << ms(timing.mask_us) << " decode_calls=" << timing.decode_calls
                   << " cache_tokens=" << timing.cache_tokens
                   << " candidate_tokens=" << timing.candidate_tokens << std::defaultfloat << std::endl;
     }
@@ -427,79 +395,30 @@ private:
         kv_cache.clear();
     }
 
-    void run_prefill(const std::vector<int64_t>& tokens, PredictTiming& timing) {
-        if (tokens.empty()) {
-            clear_cache();
-            return;
-        }
-
-        auto& manager = OnnxModelManager::instance();
-        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        std::vector<int64_t> input_ids = tokens;
-        std::vector<int64_t> attention_mask(tokens.size(), int64_t{1});
-        const std::vector<int64_t> shape{1, static_cast<int64_t>(tokens.size())};
-
-        std::vector<Ort::Value> inputs;
-        inputs.reserve(manager.prefill_input_names().size());
-        for (const auto& name : manager.prefill_input_names()) {
-            if (name == "input_ids") {
-                inputs.push_back(make_i64_tensor(memory_info, input_ids, shape));
-            } else if (name == "attention_mask") {
-                inputs.push_back(make_i64_tensor(memory_info, attention_mask, shape));
-            } else {
-                throw std::runtime_error("unsupported ONNX prefill input: " + name);
-            }
-        }
-
-        auto input_names = manager.prefill_input_ptrs();
-        auto output_names = manager.prefill_output_ptrs();
-        const auto start = std::chrono::steady_clock::now();
-        auto outputs = manager.prefill_session().Run(Ort::RunOptions{nullptr}, input_names.data(), inputs.data(),
-                                                     inputs.size(), output_names.data(), output_names.size());
-        timing.prefill_us += elapsed_us(start);
-        timing.prefill_calls++;
-
-        if (outputs.size() != manager.kv_tensor_count() + 1) {
-            throw std::runtime_error("ONNX prefill output count does not match KV cache count");
-        }
-
-        logits = copy_logits(outputs.front());
-        kv_cache.clear();
-        kv_cache.reserve(outputs.size() - 1);
-        for (size_t i = 1; i < outputs.size(); ++i) {
-            kv_cache.push_back(copy_tensor(outputs[i]));
-        }
-        prev_tokens = tokens;
-    }
-
     void decode_one(int token, PredictTiming& timing) {
-        if (kv_cache.empty() || prev_tokens.empty()) {
-            std::vector<int64_t> tokens{static_cast<int64_t>(token)};
-            run_prefill(tokens, timing);
-            timing.cache_tokens++;
-            return;
-        }
-
         auto& manager = OnnxModelManager::instance();
         Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         std::vector<int64_t> input_id{static_cast<int64_t>(token)};
-        std::vector<int64_t> attention_mask(prev_tokens.size() + 1, int64_t{1});
         std::vector<int64_t> position_id{static_cast<int64_t>(prev_tokens.size())};
+        std::vector<int64_t> cache_position{static_cast<int64_t>(prev_tokens.size())};
         const std::vector<int64_t> token_shape{1, 1};
-        const std::vector<int64_t> mask_shape{1, static_cast<int64_t>(attention_mask.size())};
+        const std::vector<int64_t> cache_position_shape{1};
 
         std::vector<Ort::Value> inputs;
         inputs.reserve(manager.decode_input_names().size());
         for (const auto& name : manager.decode_input_names()) {
             if (name == "input_ids") {
                 inputs.push_back(make_i64_tensor(memory_info, input_id, token_shape));
-            } else if (name == "attention_mask") {
-                inputs.push_back(make_i64_tensor(memory_info, attention_mask, mask_shape));
             } else if (name == "position_ids") {
                 inputs.push_back(make_i64_tensor(memory_info, position_id, token_shape));
+            } else if (name == "cache_position") {
+                inputs.push_back(make_i64_tensor(memory_info, cache_position, cache_position_shape));
             } else {
                 const size_t cache_index = manager.cache_index_for_decode_input(name);
+                if (kv_cache.empty()) {
+                    kv_cache = make_empty_kv_cache(manager.kv_tensor_count());
+                }
                 inputs.push_back(make_f32_tensor(memory_info, kv_cache[cache_index]));
             }
         }
@@ -527,6 +446,15 @@ private:
         timing.cache_tokens++;
     }
 
+    static std::vector<OnnxTensorData> make_empty_kv_cache(size_t count) {
+        std::vector<OnnxTensorData> cache;
+        cache.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            cache.push_back(OnnxTensorData{{}, {1, 16, 0, 64}});
+        }
+        return cache;
+    }
+
     void ensure_cache_aligned(const std::vector<int>& new_tokens, PredictTiming& timing) {
         size_t common = 0;
         while (common < prev_tokens.size() && common < new_tokens.size() &&
@@ -535,28 +463,10 @@ private:
         }
 
         if (common < prev_tokens.size()) {
-            if (common == 0) {
-                clear_cache();
-            } else {
-                std::vector<int64_t> prefix;
-                prefix.reserve(common);
-                for (size_t i = 0; i < common; ++i) {
-                    prefix.push_back(static_cast<int64_t>(new_tokens[i]));
-                }
-                run_prefill(prefix, timing);
-                timing.cache_tokens += common;
+            clear_cache();
+            for (size_t i = 0; i < common; ++i) {
+                decode_one(new_tokens[i], timing);
             }
-        }
-
-        if (prev_tokens.empty()) {
-            std::vector<int64_t> tokens;
-            tokens.reserve(new_tokens.size());
-            for (int token : new_tokens) {
-                tokens.push_back(static_cast<int64_t>(token));
-            }
-            run_prefill(tokens, timing);
-            timing.cache_tokens += tokens.size();
-            return;
         }
 
         for (size_t i = common; i < new_tokens.size(); ++i) {
