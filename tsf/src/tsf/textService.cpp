@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cwctype>
 #include <optional>
 
 #include "candidateUiController.hpp"
@@ -210,6 +211,77 @@ bool modified_passthrough_key(WPARAM wParam) {
     }
 
     return key_down(VK_CONTROL) || key_down(VK_MENU) || key_down(VK_SHIFT);
+}
+
+bool english_printable_key(WPARAM wParam) {
+    if (modifier_key(wParam) || key_down(VK_CONTROL) || key_down(VK_MENU)) {
+        return false;
+    }
+
+    if (wParam == VK_SPACE || (wParam >= '0' && wParam <= '9') || (wParam >= 'A' && wParam <= 'Z') ||
+        (wParam >= VK_NUMPAD0 && wParam <= VK_NUMPAD9)) {
+        return true;
+    }
+
+    switch (wParam) {
+        case VK_OEM_1:
+        case VK_OEM_PLUS:
+        case VK_OEM_COMMA:
+        case VK_OEM_MINUS:
+        case VK_OEM_PERIOD:
+        case VK_OEM_2:
+        case VK_OEM_3:
+        case VK_OEM_4:
+        case VK_OEM_5:
+        case VK_OEM_6:
+        case VK_OEM_7:
+        case VK_OEM_8:
+        case VK_OEM_102:
+        case VK_MULTIPLY:
+        case VK_ADD:
+        case VK_SEPARATOR:
+        case VK_SUBTRACT:
+        case VK_DECIMAL:
+        case VK_DIVIDE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<std::u16string> printable_key_text(WPARAM wParam, LPARAM lParam) {
+    if (!english_printable_key(wParam)) {
+        return std::nullopt;
+    }
+
+    BYTE keyboard_state[256] = {};
+    if (!GetKeyboardState(keyboard_state)) {
+        return std::nullopt;
+    }
+
+    std::array<WCHAR, 8> chars = {};
+    UINT scan_code = static_cast<UINT>((lParam >> 16) & 0xff);
+    if (scan_code == 0) {
+        scan_code = MapVirtualKeyW(static_cast<UINT>(wParam), MAPVK_VK_TO_VSC);
+    }
+
+    constexpr UINT no_keyboard_state_change = 0x4;
+    const int count = ToUnicode(static_cast<UINT>(wParam), scan_code, keyboard_state, chars.data(),
+                                static_cast<int>(chars.size()), no_keyboard_state_change);
+    if (count <= 0) {
+        return std::nullopt;
+    }
+
+    std::u16string text;
+    const int safe_count = std::min(count, static_cast<int>(chars.size()));
+    for (int i = 0; i < safe_count; i++) {
+        const WCHAR ch = chars[i];
+        if (std::iswcntrl(ch)) {
+            return std::nullopt;
+        }
+        text.push_back(static_cast<char16_t>(ch));
+    }
+    return text.empty() ? std::nullopt : std::optional{text};
 }
 
 std::optional<std::u16string> punctuation_shortcut(WPARAM wParam) {
@@ -461,12 +533,18 @@ STDMETHODIMP TextService::OnTestKeyDown(ITfContext* /*pContext*/, WPARAM wParam,
         shift_used_as_modifier_ = true;
     }
 
-    if (get_engine()->current_input_mode() == InputMode::English && compositionBuffer.empty()) {
-        *pfEaten = FALSE;
+    const bool english_mode = get_engine()->current_input_mode() == InputMode::English;
+    if (english_mode && compositionBuffer.empty()) {
+        *pfEaten = (punctuation_shortcut(wParam) || english_printable_key(wParam)) ? TRUE : FALSE;
         return S_OK;
     }
 
     if (punctuation_shortcut(wParam)) {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    if (english_mode && english_printable_key(wParam)) {
         *pfEaten = TRUE;
         return S_OK;
     }
@@ -540,7 +618,20 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         shift_used_as_modifier_ = true;
     }
 
-    if (get_engine()->current_input_mode() == InputMode::English && compositionBuffer.empty()) {
+    const bool english_mode = get_engine()->current_input_mode() == InputMode::English;
+    if (english_mode && compositionBuffer.empty()) {
+        if (const auto punctuation = punctuation_shortcut(wParam)) {
+            insert_text(pContext, *punctuation);
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
+        if (const auto text = printable_key_text(wParam, lParam)) {
+            insert_text(pContext, *text);
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
         return S_OK;
     }
 
@@ -549,6 +640,18 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         set_composition_text(pContext, compositionBuffer.to_string());
         *pfEaten = TRUE;
         return S_OK;
+    }
+
+    if (english_mode) {
+        if (const auto text = printable_key_text(wParam, lParam)) {
+            candidate_ui_->hide();
+            for (const char16_t ch : *text) {
+                compositionBuffer.add_chosen_candidate(ch);
+            }
+            set_composition_text(pContext, compositionBuffer.to_string());
+            *pfEaten = TRUE;
+            return S_OK;
+        }
     }
 
     if (modified_passthrough_key(wParam)) {
@@ -669,15 +772,12 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
  *
  * Leaves key-up events unconsumed after key-down handling.
  */
-STDMETHODIMP TextService::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM /*lParam*/, BOOL* pfEaten) try {
+STDMETHODIMP TextService::OnKeyUp(ITfContext* /*pContext*/, WPARAM wParam, LPARAM /*lParam*/, BOOL* pfEaten) try {
     if (!pfEaten) return E_INVALIDARG;
     if (shift_key(wParam) && shift_toggle_pending_) {
         if (!shift_used_as_modifier_) {
             const InputMode mode = get_engine()->toggle_input_mode();
             DebugSink::instance().send(L"MODE", mode == InputMode::Chinese ? L"Chinese" : L"English");
-            if (mode == InputMode::English && (itfComposition || !compositionBuffer.empty())) {
-                discard_composition(pContext);
-            }
         }
 
         shift_toggle_pending_ = false;
